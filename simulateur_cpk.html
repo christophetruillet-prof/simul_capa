@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulateur Cp / Cpk</title>
+<style>
+:root{--bg:#fff;--ink:#1d2733;--mute:#5d6b7a;--line:#d5dce3;--curve:#1f5f8b;--ok:rgba(31,95,139,.18);--ko:rgba(196,52,43,.55);--lim:#1d2733;--bad:#c4342b;--panel:#f3f6f9;--mean:#e08a00}
+@media (prefers-color-scheme:dark){:root{--bg:#161b22;--ink:#e6edf3;--mute:#9aa7b4;--line:#303942;--curve:#6cb4e4;--ok:rgba(108,180,228,.22);--ko:rgba(240,105,95,.6);--lim:#e6edf3;--bad:#f0695f;--panel:#1d242c;--mean:#f2a93b}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.app{max-width:900px;margin:auto}
+.params{display:flex;flex-wrap:wrap;gap:12px 20px;margin-bottom:12px}
+label{display:flex;flex-direction:column;font-size:.9rem;color:var(--mute);gap:4px}
+input[type=number]{width:120px;padding:6px 8px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px}
+input:focus-visible{outline:2px solid var(--curve);outline-offset:2px}
+.chart{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.sl{margin:14px 0 4px}
+.sl label{flex-direction:row;justify-content:space-between;align-items:baseline;color:var(--ink);font-size:1rem}
+input[type=range]{width:100%;accent-color:var(--curve)}
+#shift{accent-color:var(--mean)}
+.res{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+.res div{background:var(--panel);border-radius:8px;padding:10px 12px}
+.res small{display:block;color:var(--mute);font-size:.82rem}
+.res b{font-size:1.4rem;font-variant-numeric:tabular-nums}
+.res .nc b{color:var(--bad)}
+#err{color:var(--bad);min-height:1.4em;margin:6px 0 0}
+text{fill:var(--mute);font:12px system-ui,sans-serif}
+text.lim{fill:var(--ink);font-weight:600}
+text.mean{fill:var(--mean);font-weight:600}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="params">
+    <label>Valeur cible (centre de la tolérance)<input id="cible" type="number" value="50" step="any"></label>
+    <label>Tolérance ± (demi-intervalle)<input id="tol" type="number" value="3" step="any" min="0"></label>
+    <label>Limite inférieure SL<input id="sl" type="number" disabled></label>
+    <label>Limite supérieure SU<input id="su" type="number" disabled></label>
+  </div>
+  <p id="err" role="alert"></p>
+
+  <svg id="chart" class="chart" viewBox="0 0 800 340" role="img" aria-label="Courbe normale, limites de tolérance et moyenne du process"></svg>
+
+  <div class="sl">
+    <label for="sigma"><span>Écart-type σ</span><b id="sigmaVal"></b></label>
+    <input id="sigma" type="range" min="0" max="1000" value="500">
+  </div>
+  <div class="sl">
+    <label for="shift"><span>Décentrage de la moyenne (moyenne − cible)</span><b id="shiftVal"></b></label>
+    <input id="shift" type="range" min="-1000" max="1000" value="0">
+  </div>
+
+  <div class="res">
+    <div><small>Cp (dispersion seule)</small><b id="cp"></b></div>
+    <div><small>Cpk (dispersion + centrage)</small><b id="cpk"></b></div>
+    <div><small>Sous SL</small><b id="pInf"></b></div>
+    <div><small>Au-dessus de SU</small><b id="pSup"></b></div>
+    <div class="nc"><small>Total non conforme</small><b id="pTot"></b></div>
+    <div class="nc"><small>Équivalent en ppm</small><b id="ppm"></b></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var W=800,H=340,M={l:20,r:20,t:30,b:40};
+  var NS="http://www.w3.org/2000/svg";
+  var S_MIN_CP=2.5,S_MAX_CP=0.5; // plage de Cp du curseur σ
+  var SHIFT_MAX=1.2;             // décentrage max = ±1,2 × demi-tolérance
+
+  function erf(x){var s=x<0?-1:1;x=Math.abs(x);var t=1/(1+0.3275911*x);
+    var y=1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x);return s*y}
+  function phi(z){return 0.5*(1+erf(z/Math.SQRT2))}
+  function fmt(x,d){return x.toLocaleString("fr-FR",{maximumFractionDigits:d==null?2:d})}
+  function fmtPct(p){var v=p*100;return (v<0.001&&v>0?"< 0,001":fmt(v,v<1?3:2))+" %"}
+  function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e}
+
+  var st={c:50,h:3,sigma:1,shift:0};
+
+  function readSliders(){
+    var h=st.h,smin=h/(3*S_MIN_CP),smax=h/(3*S_MAX_CP);
+    st.sigma=smin+(smax-smin)*($("sigma").value/1000);
+    st.shift=SHIFT_MAX*h*($("shift").value/1000);
+  }
+  function resetSliders(){
+    var h=st.h,smin=h/(3*S_MIN_CP),smax=h/(3*S_MAX_CP);
+    $("sigma").value=Math.round((h/3-smin)/(smax-smin)*1000); // Cp = 1
+    $("shift").value=0;
+    readSliders();
+  }
+
+  function draw(){
+    var c=st.c,h=st.h,sg=st.sigma,mu=c+st.shift;
+    var SL=c-h,SU=c+h;
+    var xmin=c-2.5*h,xmax=c+2.5*h;
+    var ymax=1/((h/(3*S_MIN_CP))*Math.sqrt(2*Math.PI))*1.12;
+    var X=function(x){return M.l+(x-xmin)/(xmax-xmin)*(W-M.l-M.r)};
+    var Y=function(y){return H-M.b-y/ymax*(H-M.b-M.t)};
+    var pdf=function(x){var z=(x-mu)/sg;return Math.exp(-z*z/2)/(sg*Math.sqrt(2*Math.PI))};
+
+    var svg=$("chart");while(svg.firstChild)svg.removeChild(svg.firstChild);
+    var base=Y(0),i,x,d;
+
+    function area(a,b,fill){
+      d="M"+X(a)+","+base;
+      for(i=0;i<=80;i++){x=a+(b-a)*i/80;d+=" L"+X(x)+","+Y(pdf(x))}
+      d+=" L"+X(b)+","+base+"Z";
+      svg.appendChild(el("path",{d:d,fill:fill}));
+    }
+    area(SL,SU,"var(--ok)");area(xmin,SL,"var(--ko)");area(SU,xmax,"var(--ko)");
+
+    svg.appendChild(el("line",{x1:M.l,x2:W-M.r,y1:base,y2:base,stroke:"var(--line)","stroke-width":1.5}));
+
+    d="";for(i=0;i<=300;i++){x=xmin+(xmax-xmin)*i/300;d+=(i?" L":"M")+X(x)+","+Y(pdf(x))}
+    svg.appendChild(el("path",{d:d,fill:"none",stroke:"var(--curve)","stroke-width":2.5}));
+
+    // Cible (gris pointillé) et moyenne du process (orange)
+    svg.appendChild(el("line",{x1:X(c),x2:X(c),y1:M.t,y2:base,stroke:"var(--mute)","stroke-dasharray":"4 4"}));
+    var t=el("text",{x:X(c),y:base+34,"text-anchor":"middle"});t.textContent="cible "+fmt(c,4);svg.appendChild(t);
+    svg.appendChild(el("line",{x1:X(mu),x2:X(mu),y1:Y(pdf(mu)),y2:base,stroke:"var(--mean)","stroke-width":2.5}));
+    var m=el("text",{x:X(mu),y:Y(pdf(mu))-6,"text-anchor":"middle","class":"mean"});m.textContent="moyenne "+fmt(mu,4);svg.appendChild(m);
+
+    [[SL,"SL"],[SU,"SU"]].forEach(function(p){
+      svg.appendChild(el("line",{x1:X(p[0]),x2:X(p[0]),y1:M.t-8,y2:base,stroke:"var(--lim)","stroke-width":3}));
+      var a=el("text",{x:X(p[0]),y:M.t-14,"text-anchor":"middle","class":"lim"});a.textContent=p[1];svg.appendChild(a);
+      var b=el("text",{x:X(p[0]),y:base+18,"text-anchor":"middle","class":"lim"});b.textContent=fmt(p[0],4);svg.appendChild(b);
+    });
+
+    var pInf=phi((SL-mu)/sg),pSup=1-phi((SU-mu)/sg),tot=pInf+pSup;
+    var cp=h/(3*sg),cpk=Math.min(SU-mu,mu-SL)/(3*sg);
+    $("sl").value=+SL.toFixed(6);$("su").value=+SU.toFixed(6);
+    $("sigmaVal").textContent=fmt(sg,4);
+    $("shiftVal").textContent=(st.shift>0?"+":"")+fmt(st.shift,4)+"  ("+fmt(st.shift/h*100,0)+" % de la demi-tolérance)";
+    $("cp").textContent=fmt(cp,2);
+    $("cpk").textContent=fmt(cpk,2);
+    $("pInf").textContent=fmtPct(pInf);
+    $("pSup").textContent=fmtPct(pSup);
+    $("pTot").textContent=fmtPct(tot);
+    $("ppm").textContent=fmt(tot*1e6,tot*1e6<10?2:0)+" ppm";
+  }
+
+  function onParams(){
+    var c=parseFloat($("cible").value),h=parseFloat($("tol").value);
+    if(isNaN(c)||isNaN(h)||h<=0){$("err").textContent="Saisir une cible et une tolérance ± strictement positive.";return}
+    $("err").textContent="";st.c=c;st.h=h;resetSliders();draw();
+  }
+  $("cible").addEventListener("input",onParams);
+  $("tol").addEventListener("input",onParams);
+  $("sigma").addEventListener("input",function(){readSliders();draw()});
+  $("shift").addEventListener("input",function(){readSliders();draw()});
+  onParams();
+})();
+</script>
+</body>
+</html>
